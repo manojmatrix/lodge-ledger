@@ -1,0 +1,879 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lodge Management Dashboard</title>
+    <!-- Load Tailwind CSS for simple, clean, and responsive styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom scrollbar for a cleaner look */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+        .card { transition: all 0.3s ease; }
+        .tab-button.active {
+            border-bottom: 3px solid #ef4444; /* red-500 */
+            color: #ef4444;
+            font-weight: 600;
+        }
+        /* Custom style for INR display */
+        .currency-inr {
+            font-family: 'Inter', sans-serif;
+            font-weight: 700;
+        }
+        /* Hide scrollbar for forms/inputs on narrow mobile views */
+        @media (max-width: 640px) {
+            .sm\:overflow-y-auto { overflow-y: scroll; }
+        }
+    </style>
+    <!-- Load Inter font -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    },
+                }
+            }
+        }
+    </script>
+</head>
+<body class="bg-gray-50 min-h-screen text-gray-800 font-sans">
+
+    <!-- Firebase SDK Imports -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, query, orderBy, onSnapshot, addDoc, serverTimestamp, setDoc, doc, where, getDocs, runTransaction, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+
+        // Global variables for Firebase services
+        let app;
+        let db;
+        let auth;
+        let userId = 'unknown';
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+        // --- Data Stores ---
+        let allSales = [];
+        let allExpenses = [];
+
+
+        // Helper for currency formatting
+        window.formatINR = (amount) => {
+            return new Intl.NumberFormat('en-IN', {
+                style: 'currency',
+                currency: 'INR',
+                maximumFractionDigits: 0
+            }).format(amount);
+        };
+        
+        // Helper for masking Aadhar number for privacy in the display table
+        window.maskAadhar = (aadhar) => {
+            if (!aadhar || aadhar.length < 12) return 'N/A';
+            // Display last 4 digits, masked for security
+            return 'XXXX XXXX ' + aadhar.substring(8);
+        };
+
+
+        // --- CORE FIREBASE INITIALIZATION AND AUTHENTICATION ---
+        window.initFirebase = async () => {
+            try {
+                // Set debug logging for Firestore
+                setLogLevel('Debug');
+
+                const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                // Authentication using custom token or anonymously
+                const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        document.getElementById('user-id-display').textContent = `User ID: ${userId.substring(0, 8)}...`;
+                        console.log("Firebase initialized and user signed in:", userId);
+                        // Start listeners only after auth is ready
+                        window.setupRealtimeListeners();
+                    } else {
+                        console.log("User signed out or anonymous.");
+                    }
+                });
+
+                window.db = db;
+                window.auth = auth;
+
+            } catch (error) {
+                console.error("Error initializing Firebase:", error);
+                document.getElementById('status-message').textContent = `Initialization Error: ${error.message}`;
+            }
+        };
+
+        // --- FIREBASE DATA PATHS ---
+
+        const getUserId = () => auth.currentUser?.uid || crypto.randomUUID();
+        const getSalesCollectionRef = () => collection(db, `artifacts/${appId}/public/data/sales_records`);
+        const getExpensesCollectionRef = () => collection(db, `artifacts/${appId}/users/${getUserId()}/daily_expenses`);
+
+
+        // --- FIREBASE DATA FUNCTIONS ---
+
+        // Saves a new sales record
+        window.saveSale = async (event) => {
+            event.preventDefault();
+            const form = event.target;
+            const customerName = form.customerName.value.trim();
+            const aadharNumber = form.aadharNumber.value.trim();
+            const roomNumber = form.roomNumber.value.trim();
+            const checkIn = form.checkIn.value;
+            const checkOut = form.checkOut.value;
+            const totalRevenue = parseFloat(form.totalRevenue.value);
+            const collectionType = form.collectionType.value;
+
+            // Basic Validation for Aadhar: check if provided, it must be 12 digits
+            if (aadharNumber.length > 0 && (aadharNumber.length !== 12 || !/^\d+$/.test(aadharNumber))) {
+                window.showCustomAlert('Aadhar number must be exactly 12 numeric digits if provided.', 'warning');
+                return;
+            }
+
+            // Check other required fields
+            if (!customerName || !roomNumber || !checkIn || !checkOut || isNaN(totalRevenue) || totalRevenue <= 0) {
+                window.showCustomAlert('Please fill in all required fields correctly.', 'warning');
+                return;
+            }
+
+            try {
+                await addDoc(getSalesCollectionRef(), {
+                    customerName,
+                    aadharNumber: aadharNumber || '',
+                    roomNumber,
+                    checkIn,
+                    checkOut,
+                    totalRevenue,
+                    collectionType,
+                    timestamp: serverTimestamp(),
+                    userId: getUserId()
+                });
+
+                window.showCustomAlert('Sale recorded successfully!', 'success');
+                form.reset();
+            } catch (e) {
+                console.error("Error adding sale document: ", e);
+                window.showCustomAlert(`Error saving sale: ${e.message}`, 'error');
+            }
+        };
+
+        // Saves a new expense record
+        window.saveExpense = async (event) => {
+            event.preventDefault();
+            const form = event.target;
+            const amount = parseFloat(form.expenseAmount.value);
+            const reason = form.expenseReason.value.trim();
+            const date = form.expenseDate.value;
+
+            if (isNaN(amount) || amount <= 0 || !reason || !date) {
+                window.showCustomAlert('Please enter a valid amount, reason, and date.', 'warning');
+                return;
+            }
+
+            try {
+                await addDoc(getExpensesCollectionRef(), {
+                    amount,
+                    reason,
+                    date,
+                    timestamp: serverTimestamp(),
+                    userId: getUserId()
+                });
+
+                window.showCustomAlert('Expense recorded successfully!', 'success');
+                form.reset();
+                form.expenseDate.valueAsDate = new Date(); // Reset date to today
+            } catch (e) {
+                console.error("Error adding expense document: ", e);
+                window.showCustomAlert(`Error saving expense: ${e.message}`, 'error');
+            }
+        };
+
+        // --- DASHBOARD METRICS CALCULATION AND RENDERING ---
+        
+        window.calculateAndRenderDashboard = () => {
+            // Get start and end date for the current month
+            const now = new Date();
+            const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+            const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+
+            let totalMonthlyRevenue = 0;
+            let totalMonthlyExpenses = 0;
+            let cashCollection = 0;
+            let phonePeCollection = 0;
+
+            // 1. Calculate Monthly Metrics
+            allSales.forEach(sale => {
+                const saleDate = sale.timestamp?.toDate ? sale.timestamp.toDate() : new Date();
+                if (saleDate >= startOfMonth && saleDate <= endOfMonth) {
+                    totalMonthlyRevenue += sale.totalRevenue;
+                    if (sale.collectionType === 'Cash') {
+                        cashCollection += sale.totalRevenue;
+                    } else if (sale.collectionType === 'PhonePe') {
+                        phonePeCollection += sale.totalRevenue;
+                    }
+                }
+            });
+
+            allExpenses.forEach(expense => {
+                const expenseDate = new Date(expense.timestamp?.toDate ? expense.timestamp.toDate() : new Date(expense.date));
+                if (expenseDate >= startOfMonth && expenseDate <= endOfMonth) {
+                    totalMonthlyExpenses += expense.amount;
+                }
+            });
+
+            const totalMonthlyProfit = totalMonthlyRevenue - totalMonthlyExpenses;
+
+            // 2. Render Monthly Metrics
+            document.getElementById('monthly-revenue').textContent = formatINR(totalMonthlyRevenue);
+            document.getElementById('monthly-expenses').textContent = formatINR(totalMonthlyExpenses);
+            document.getElementById('monthly-profit').textContent = formatINR(totalMonthlyProfit);
+            document.getElementById('collection-cash').textContent = formatINR(cashCollection);
+            document.getElementById('collection-phonepe').textContent = formatINR(phonePeCollection);
+
+            // 3. Render Sales Analytics Table (Last 10 Sales)
+            renderSalesTable();
+
+            // 4. Render Daily Report
+            renderDailyReport();
+
+            // 5. Re-run expense filtering when new data arrives
+            filterHistoricalExpenses();
+        };
+
+
+        // --- REAL-TIME LISTENERS ---
+
+        window.setupRealtimeListeners = () => {
+            // Listener for Sales Records
+            const salesQuery = query(getSalesCollectionRef(), orderBy("timestamp", "desc"));
+            onSnapshot(salesQuery, (snapshot) => {
+                allSales = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                window.calculateAndRenderDashboard();
+            }, (error) => {
+                console.error("Error listening to sales records:", error);
+            });
+
+            // Listener for Expense Records
+            const expensesQuery = query(getExpensesCollectionRef(), orderBy("timestamp", "desc"));
+            onSnapshot(expensesQuery, (snapshot) => {
+                allExpenses = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                window.calculateAndRenderDashboard();
+            }, (error) => {
+                console.error("Error listening to expense records:", error);
+            });
+        };
+
+        // --- RENDERING SUB-COMPONENTS ---
+
+        const formatDate = (dateString) => {
+            if (!dateString) return 'N/A';
+            const options = { day: '2-digit', month: 'short', year: 'numeric' };
+            try {
+                return new Date(dateString).toLocaleDateString('en-IN', options);
+            } catch {
+                return dateString;
+            }
+        };
+
+        const renderSalesTable = () => {
+            const tableBody = document.getElementById('sales-analytics-body');
+            if (!tableBody) return;
+
+            tableBody.innerHTML = '';
+
+            // Only show the last 10 sales
+            const recentSales = allSales.slice(0, 10);
+
+            if (recentSales.length === 0) {
+                tableBody.innerHTML = '<tr><td colspan="7" class="p-4 text-center text-gray-500">No sales recorded yet.</td></tr>';
+                return;
+            }
+
+            recentSales.forEach(sale => {
+                const row = `
+                    <tr class="hover:bg-gray-50 border-b">
+                        <td class="p-3 text-sm font-medium">${sale.customerName}</td>
+                        <td class="p-3 text-sm text-gray-500 font-mono">${window.maskAadhar(sale.aadharNumber || '')}</td>
+                        <td class="p-3 text-sm text-center">${sale.roomNumber}</td>
+                        <td class="p-3 text-sm">${formatDate(sale.checkIn)}</td>
+                        <td class="p-3 text-sm">${formatDate(sale.checkOut)}</td>
+                        <td class="p-3 text-sm currency-inr text-red-600 font-semibold">${formatINR(sale.totalRevenue)}</td>
+                        <td class="p-3 text-sm">
+                            <span class="px-2 py-1 text-xs font-semibold rounded-full ${sale.collectionType === 'Cash' ? 'bg-green-100 text-green-800' : 'bg-blue-100 text-blue-800'}">
+                                ${sale.collectionType}
+                            </span>
+                        </td>
+                    </tr>
+                `;
+                tableBody.innerHTML += row;
+            });
+        };
+
+        const renderDailyReport = () => {
+            const now = new Date();
+            const todayDateString = now.toISOString().split('T')[0];
+            const dailyReportContainer = document.getElementById('daily-report-summary');
+            const dailyExpensesTableBody = document.getElementById('daily-expenses-body');
+
+            if (!dailyReportContainer || !dailyExpensesTableBody) return;
+
+            // 1. Filter data for Today
+            const salesToday = allSales.filter(sale => {
+                const saleDate = sale.timestamp?.toDate ? sale.timestamp.toDate().toISOString().split('T')[0] : 'N/A';
+                return saleDate === todayDateString;
+            });
+
+            const expensesToday = allExpenses.filter(expense => expense.date === todayDateString);
+
+            // 2. Calculate Daily Totals
+            const dailyRevenue = salesToday.reduce((sum, sale) => sum + sale.totalRevenue, 0);
+            const dailyExpenses = expensesToday.reduce((sum, expense) => sum + expense.amount, 0);
+            const dailyProfit = dailyRevenue - dailyExpenses;
+
+            // 3. Render Daily Report Summary
+            dailyReportContainer.innerHTML = `
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                    ${createReportCard('Daily Revenue', dailyRevenue, 'bg-emerald-50 text-emerald-700', 'text-emerald-600')}
+                    ${createReportCard('Daily Expenses', dailyExpenses, 'bg-red-50 text-red-700', 'text-red-600')}
+                    ${createReportCard('Daily Profit', dailyProfit, dailyProfit >= 0 ? 'bg-indigo-50 text-indigo-700' : 'bg-yellow-50 text-yellow-700', dailyProfit >= 0 ? 'text-indigo-600' : 'text-yellow-600')}
+                </div>
+            `;
+
+            // 4. Render Daily Expenses Table
+            dailyExpensesTableBody.innerHTML = '';
+            if (expensesToday.length === 0) {
+                dailyExpensesTableBody.innerHTML = '<tr><td colspan="3" class="p-4 text-center text-gray-500">No expenses recorded for today.</td></tr>';
+                return;
+            }
+
+            expensesToday.forEach(expense => {
+                const row = `
+                    <tr class="hover:bg-gray-50 border-b">
+                        <td class="p-3 text-sm font-medium">${expense.reason}</td>
+                        <td class="p-3 text-sm text-center">${expense.date}</td>
+                        <td class="p-3 text-sm currency-inr text-red-600 font-semibold">${formatINR(expense.amount)}</td>
+                    </tr>
+                `;
+                dailyExpensesTableBody.innerHTML += row;
+            });
+        };
+
+        const createReportCard = (title, amount, bgColor, textColor) => {
+            return `
+                <div class="p-4 rounded-xl shadow-lg border ${bgColor} flex items-center justify-between">
+                    <div>
+                        <p class="text-sm font-medium ${textColor}">${title}</p>
+                        <p class="text-2xl currency-inr font-extrabold ${textColor}" title="${amount}">
+                            ${formatINR(amount)}
+                        </p>
+                    </div>
+                </div>
+            `;
+        };
+        
+        // --- HISTORICAL EXPENSE FILTERING AND RENDERING (NEW FEATURE 1) ---
+
+        window.filterHistoricalExpenses = () => {
+            const startDate = document.getElementById('expense-start-date')?.value;
+            const endDate = document.getElementById('expense-end-date')?.value;
+            const keyword = document.getElementById('expense-keyword')?.value.toLowerCase();
+            const tableBody = document.getElementById('historical-expenses-body');
+
+            if (!tableBody) return;
+
+            let filteredExpenses = allExpenses;
+
+            // Filter by Date Range
+            if (startDate || endDate) {
+                filteredExpenses = filteredExpenses.filter(expense => {
+                    const expenseDate = expense.date; // already in YYYY-MM-DD format
+                    let passesStart = true;
+                    let passesEnd = true;
+
+                    if (startDate && expenseDate < startDate) {
+                        passesStart = false;
+                    }
+                    if (endDate && expenseDate > endDate) {
+                        passesEnd = false;
+                    }
+
+                    return passesStart && passesEnd;
+                });
+            }
+
+            // Filter by Keyword (Reason)
+            if (keyword) {
+                filteredExpenses = filteredExpenses.filter(expense => 
+                    expense.reason.toLowerCase().includes(keyword)
+                );
+            }
+            
+            // Render the filtered results
+            tableBody.innerHTML = '';
+            let totalFilteredAmount = 0;
+
+            if (filteredExpenses.length === 0) {
+                tableBody.innerHTML = '<tr><td colspan="3" class="p-4 text-center text-gray-500">No matching expenses found for the current filters.</td></tr>';
+                document.getElementById('total-filtered-expense').textContent = formatINR(0);
+                return;
+            }
+            
+            filteredExpenses.forEach(expense => {
+                totalFilteredAmount += expense.amount;
+                const row = `
+                    <tr class="hover:bg-gray-50 border-b">
+                        <td class="p-3 text-sm font-medium">${expense.reason}</td>
+                        <td class="p-3 text-sm text-center">${expense.date}</td>
+                        <td class="p-3 text-sm currency-inr text-red-600 font-semibold">${formatINR(expense.amount)}</td>
+                    </tr>
+                `;
+                tableBody.innerHTML += row;
+            });
+
+            document.getElementById('total-filtered-expense').textContent = formatINR(totalFilteredAmount);
+        };
+
+        // --- DATA EXPORT FUNCTIONALITY (NEW FEATURE 2) ---
+
+        /**
+         * Generates and downloads a CSV file from data.
+         * @param {Array<Object>} data The array of objects to export.
+         * @param {Array<string>} headers The field names to use as column headers.
+         * @param {string} fileName The desired file name (without extension).
+         */
+        window.exportToCSV = (data, headers, fileName) => {
+            if (data.length === 0) {
+                window.showCustomAlert('No data to export.', 'warning');
+                return;
+            }
+            
+            // 1. Create CSV Header
+            const csvHeader = headers.map(h => `"${h}"`).join(',');
+            
+            // 2. Create CSV Rows
+            const csvRows = data.map(row => {
+                return headers.map(header => {
+                    let value = row[header] !== undefined ? row[header] : '';
+                    if (typeof value === 'object' && value !== null && value.toDate) {
+                        // Handle Firestore Timestamps
+                        value = value.toDate().toISOString();
+                    }
+                    // Handle commas and quotes in values by wrapping them in quotes
+                    if (typeof value === 'string' && (value.includes(',') || value.includes('"'))) {
+                        value = `"${value.replace(/"/g, '""')}"`;
+                    }
+                    return value;
+                }).join(',');
+            }).join('\n');
+
+            const csvContent = csvHeader + '\n' + csvRows;
+
+            // 3. Download the file
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement("a");
+            if (link.download !== undefined) { 
+                const url = URL.createObjectURL(blob);
+                link.setAttribute("href", url);
+                link.setAttribute("download", fileName + '.csv');
+                link.style.visibility = 'hidden';
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                window.showCustomAlert(`Exported ${data.length} records to ${fileName}.csv`, 'success');
+            } else {
+                window.showCustomAlert("Your browser does not support CSV download.", 'error');
+            }
+        };
+
+        window.exportSales = () => {
+            const headers = ['customerName', 'roomNumber', 'checkIn', 'checkOut', 'totalRevenue', 'collectionType', 'aadharNumber', 'timestamp'];
+            window.exportToCSV(allSales, headers, 'Lodge_Sales_Records');
+        };
+
+        window.exportFilteredExpenses = () => {
+            // Use the currently filtered expenses (re-filter to ensure accuracy)
+            const startDate = document.getElementById('expense-start-date')?.value;
+            const endDate = document.getElementById('expense-end-date')?.value;
+            const keyword = document.getElementById('expense-keyword')?.value.toLowerCase();
+
+            let filteredExpenses = allExpenses;
+            if (startDate || endDate) {
+                filteredExpenses = filteredExpenses.filter(expense => {
+                    const expenseDate = expense.date; 
+                    let passesStart = true;
+                    let passesEnd = true;
+
+                    if (startDate && expenseDate < startDate) { passesStart = false; }
+                    if (endDate && expenseDate > endDate) { passesEnd = false; }
+
+                    return passesStart && passesEnd;
+                });
+            }
+            if (keyword) {
+                filteredExpenses = filteredExpenses.filter(expense => expense.reason.toLowerCase().includes(keyword));
+            }
+
+            const headers = ['date', 'amount', 'reason', 'timestamp'];
+            window.exportToCSV(filteredExpenses, headers, 'Lodge_Filtered_Expenses');
+        };
+
+        // --- UI UTILITIES ---
+
+        // Function to handle tab switching
+        window.switchTab = (tabName) => {
+            document.querySelectorAll('.tab-content').forEach(content => {
+                content.classList.add('hidden');
+            });
+            document.getElementById(tabName).classList.remove('hidden');
+
+            document.querySelectorAll('.tab-button').forEach(button => {
+                button.classList.remove('active');
+            });
+            document.getElementById(`${tabName}-tab`).classList.add('active');
+            
+            // Trigger filter when moving to Financial Reports tab
+            if (tabName === 'financial-reports') {
+                filterHistoricalExpenses();
+            }
+        };
+
+        // Custom alert/modal (as alerts are forbidden)
+        window.showCustomAlert = (message, type = 'info') => {
+            const modal = document.getElementById('custom-alert-modal');
+            const alertText = document.getElementById('alert-text');
+            const iconContainer = document.getElementById('alert-icon');
+            let iconSvg = '';
+
+            modal.classList.remove('hidden');
+
+            // Set message and styling
+            alertText.textContent = message;
+            iconContainer.className = 'mx-auto flex-shrink-0 flex items-center justify-center h-12 w-12 rounded-full';
+
+            if (type === 'success') {
+                iconContainer.classList.add('bg-green-100');
+                iconSvg = `<svg class="h-6 w-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>`;
+            } else if (type === 'warning') {
+                iconContainer.classList.add('bg-yellow-100');
+                iconSvg = `<svg class="h-6 w-6 text-yellow-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.39 18c-.77 1.333.192 3 1.732 3z"/></svg>`;
+            } else { // error/info
+                iconContainer.classList.add('bg-red-100');
+                iconSvg = `<svg class="h-6 w-6 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>`;
+            }
+
+            iconContainer.innerHTML = iconSvg;
+
+            // Auto-hide after 3 seconds
+            setTimeout(() => {
+                modal.classList.add('hidden');
+            }, 3000);
+        };
+
+
+        // Initialize Firebase when the page loads
+        window.onload = () => {
+            document.getElementById('expenseDate').valueAsDate = new Date();
+            window.initFirebase();
+            window.switchTab('sales-entry'); // Start on the Sales tab
+        };
+
+    </script>
+    <div class="max-w-7xl mx-auto p-4 sm:p-6 lg:p-8">
+
+        <!-- Header -->
+        <header class="mb-8">
+            <h1 class="text-3xl font-extrabold text-red-600 tracking-tight">Lodge Operations Dashboard</h1>
+            <p class="text-gray-500 mt-1" id="user-id-display">Connecting to services...</p>
+        </header>
+
+        <!-- DASHBOARD SUMMARY & ANALYTICS -->
+        <div class="mb-8 p-6 bg-white rounded-xl shadow-xl">
+            <h2 class="text-xl font-bold mb-4 text-gray-700 border-b pb-2">Monthly Financial Overview</h2>
+            <div class="grid grid-cols-2 md:grid-cols-5 gap-4">
+                <!-- Total Monthly Revenue -->
+                <div class="card p-4 bg-red-50 rounded-lg shadow-sm border border-red-200">
+                    <p class="text-sm font-medium text-red-700">Monthly Revenue</p>
+                    <p id="monthly-revenue" class="text-2xl currency-inr font-extrabold text-red-600 mt-1">₹ 0</p>
+                </div>
+                <!-- Total Monthly Expenses -->
+                <div class="card p-4 bg-gray-100 rounded-lg shadow-sm border border-gray-300">
+                    <p class="text-sm font-medium text-gray-700">Monthly Expenses</p>
+                    <p id="monthly-expenses" class="text-2xl currency-inr font-extrabold text-gray-600 mt-1">₹ 0</p>
+                </div>
+                <!-- Total Monthly Profit -->
+                <div class="card p-4 bg-green-50 rounded-lg shadow-sm border border-green-200">
+                    <p class="text-sm font-medium text-green-700">Monthly Profit</p>
+                    <p id="monthly-profit" class="text-2xl currency-inr font-extrabold text-green-600 mt-1">₹ 0</p>
+                </div>
+                <!-- Cash Collection -->
+                <div class="card p-4 bg-blue-50 rounded-lg shadow-sm border border-blue-200">
+                    <p class="text-sm font-medium text-blue-700">Cash Collection</p>
+                    <p id="collection-cash" class="text-2xl currency-inr font-extrabold text-blue-600 mt-1">₹ 0</p>
+                </div>
+                <!-- PhonePe Collection -->
+                <div class="card p-4 bg-purple-50 rounded-lg shadow-sm border border-purple-200">
+                    <p class="text-sm font-medium text-purple-700">PhonePe Collection</p>
+                    <p id="collection-phonepe" class="text-2xl currency-inr font-extrabold text-purple-600 mt-1">₹ 0</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB NAVIGATION -->
+        <div class="border-b border-gray-200 mb-6">
+            <nav class="-mb-px flex space-x-8" aria-label="Tabs">
+                <button id="sales-entry-tab" onclick="switchTab('sales-entry')"
+                    class="tab-button active py-3 px-1 text-center text-sm font-medium whitespace-nowrap text-gray-500 hover:text-red-500">
+                    1. Sales Entry & Customer Details
+                </button>
+                <button id="financial-reports-tab" onclick="switchTab('financial-reports')"
+                    class="tab-button py-3 px-1 text-center text-sm font-medium whitespace-nowrap text-gray-500 hover:text-red-500">
+                    2. Financial Reports
+                </button>
+            </nav>
+        </div>
+
+        <!-- TAB CONTENT CONTAINER -->
+        <main>
+            <!-- ---------------------------------------------------- -->
+            <!-- PAGE 1: SALES ENTRY & CUSTOMER DETAILS -->
+            <!-- ---------------------------------------------------- -->
+            <div id="sales-entry" class="tab-content">
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                    <!-- Sales Form (1/3 width on desktop) -->
+                    <div class="lg:col-span-1 p-6 bg-white rounded-xl shadow-lg h-fit">
+                        <h3 class="text-lg font-semibold mb-4 text-gray-700">New Customer Check-in</h3>
+                        <form onsubmit="saveSale(event)" class="space-y-4">
+                            <div>
+                                <label for="customerName" class="block text-sm font-medium text-gray-700">Customer Name</label>
+                                <input type="text" id="customerName" name="customerName" required
+                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-red-500 focus:ring-red-500">
+                            </div>
+                            <!-- Aadhar Entry Field -->
+                            <div>
+                                <label for="aadharNumber" class="block text-sm font-medium text-gray-700">Customer Aadhar Number (Optional)</label>
+                                <input type="text" id="aadharNumber" name="aadharNumber" maxlength="12" pattern="\d{12}" title="Aadhar number must be 12 digits"
+                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-red-500 focus:ring-red-500">
+                            </div>
+                            <div>
+                                <label for="roomNumber" class="block text-sm font-medium text-gray-700">Room Allotted (e.g. 101)</label>
+                                <input type="text" id="roomNumber" name="roomNumber" required
+                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-red-500 focus:ring-red-500">
+                            </div>
+                            <div class="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label for="checkIn" class="block text-sm font-medium text-gray-700">Check-in Date</label>
+                                    <input type="date" id="checkIn" name="checkIn" required
+                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-red-500 focus:ring-red-500">
+                                </div>
+                                <div>
+                                    <label for="checkOut" class="block text-sm font-medium text-gray-700">Check-out Date</label>
+                                    <input type="date" id="checkOut" name="checkOut" required
+                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-red-500 focus:ring-red-500">
+                                </div>
+                            </div>
+                            <div>
+                                <label for="totalRevenue" class="block text-sm font-medium text-gray-700">Total Revenue (INR)</label>
+                                <input type="number" id="totalRevenue" name="totalRevenue" required min="0.01" step="0.01"
+                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-red-500 focus:ring-red-500">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Collection Method</label>
+                                <select id="collectionType" name="collectionType" required
+                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-red-500 focus:ring-red-500">
+                                    <option value="Cash">Cash Collection</option>
+                                    <option value="PhonePe">PhonePe Collection</option>
+                                </select>
+                            </div>
+                            <button type="submit"
+                                class="w-full py-2 px-4 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 transition duration-150">
+                                Record Sale & Check-in
+                            </button>
+                        </form>
+                    </div>
+
+                    <!-- Sales Analytics Table (2/3 width on desktop) -->
+                    <div class="lg:col-span-2 p-6 bg-white rounded-xl shadow-lg sm:overflow-y-auto">
+                        <div class="flex justify-between items-center mb-4">
+                            <h3 class="text-lg font-semibold text-gray-700">Recent Sales Analytics (Last 10 Records)</h3>
+                            <button onclick="exportSales()"
+                                class="flex items-center text-sm font-medium text-white bg-green-500 hover:bg-green-600 px-3 py-1.5 rounded-lg shadow transition duration-150">
+                                <!-- SVG for Download Icon -->
+                                <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                                Export All Sales
+                            </button>
+                        </div>
+                        <div class="overflow-x-auto">
+                            <table class="min-w-full divide-y divide-gray-200">
+                                <thead class="bg-gray-50">
+                                    <tr>
+                                        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Customer</th>
+                                        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Aadhar No.</th>
+                                        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider text-center">Room</th>
+                                        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Check-in</th>
+                                        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Check-out</th>
+                                        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Revenue (₹)</th>
+                                        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Collection</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="sales-analytics-body" class="bg-white divide-y divide-gray-200">
+                                    <!-- Sales records will be dynamically inserted here -->
+                                    <tr><td colspan="7" class="p-4 text-center text-gray-500">Loading sales data...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ---------------------------------------------------- -->
+            <!-- PAGE 2: FINANCIAL REPORTS (UPDATED) -->
+            <!-- ---------------------------------------------------- -->
+            <div id="financial-reports" class="tab-content hidden">
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                    
+                    <!-- Expense Form (1/3 width on desktop) -->
+                    <div class="lg:col-span-1 p-6 bg-white rounded-xl shadow-lg h-fit">
+                        <h3 class="text-lg font-semibold mb-4 text-gray-700">Record Daily Expense</h3>
+                        <form onsubmit="saveExpense(event)" class="space-y-4">
+                             <div>
+                                <label for="expenseDate" class="block text-sm font-medium text-gray-700">Date of Expense</label>
+                                <input type="date" id="expenseDate" name="expenseDate" required
+                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-red-500 focus:ring-red-500">
+                            </div>
+                            <div>
+                                <label for="expenseAmount" class="block text-sm font-medium text-gray-700">Amount (INR)</label>
+                                <input type="number" id="expenseAmount" name="expenseAmount" required min="0.01" step="0.01"
+                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-red-500 focus:ring-red-500">
+                            </div>
+                            <div>
+                                <label for="expenseReason" class="block text-sm font-medium text-gray-700">Reason for Expense</label>
+                                <textarea id="expenseReason" name="expenseReason" rows="3" required
+                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-red-500 focus:ring-red-500"></textarea>
+                            </div>
+                            <button type="submit"
+                                class="w-full py-2 px-4 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 transition duration-150">
+                                Record Expense
+                            </button>
+                        </form>
+                    </div>
+
+                    <!-- Daily Report & Settlements (2/3 width on desktop) -->
+                    <div class="lg:col-span-2 p-6 bg-white rounded-xl shadow-lg">
+                        
+                        <!-- Daily Settlement Report -->
+                        <h3 class="text-lg font-semibold mb-4 text-gray-700 border-b pb-2">Today's Settlement Report</h3>
+                        <div id="daily-report-summary">
+                            <p class="text-gray-500 text-center py-8">Calculating today's figures...</p>
+                        </div>
+
+                        <!-- Daily Expenses Breakdown -->
+                        <h4 class="text-md font-semibold mt-6 mb-3 text-gray-600 border-t pt-4">Daily Expenses Breakdown</h4>
+                        <div class="overflow-x-auto mb-6">
+                             <table class="min-w-full divide-y divide-gray-200">
+                                <thead class="bg-gray-50">
+                                    <tr>
+                                        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Reason</th>
+                                        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider text-center">Date</th>
+                                        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Amount (₹)</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="daily-expenses-body" class="bg-white divide-y divide-gray-200">
+                                    <tr><td colspan="3" class="p-4 text-center text-gray-500">Loading expenses data...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        
+                        <!-- Historical Expense Tracking (NEW FEATURE) -->
+                        <h3 class="text-lg font-semibold mb-4 text-gray-700 border-t pt-4">Historical Expense Report</h3>
+                        
+                        <div class="flex flex-col sm:flex-row gap-4 mb-4 p-3 bg-gray-50 rounded-lg border">
+                            <!-- Date Filters -->
+                            <div class="flex-1">
+                                <label for="expense-start-date" class="block text-xs font-medium text-gray-500">From Date</label>
+                                <input type="date" id="expense-start-date" onchange="filterHistoricalExpenses()"
+                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-red-500 focus:ring-red-500 text-sm">
+                            </div>
+                            <div class="flex-1">
+                                <label for="expense-end-date" class="block text-xs font-medium text-gray-500">To Date</label>
+                                <input type="date" id="expense-end-date" onchange="filterHistoricalExpenses()"
+                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-red-500 focus:ring-red-500 text-sm">
+                            </div>
+                            <!-- Keyword Filter -->
+                            <div class="flex-1">
+                                <label for="expense-keyword" class="block text-xs font-medium text-gray-500">Filter by Reason Keyword</label>
+                                <input type="text" id="expense-keyword" oninput="filterHistoricalExpenses()" placeholder="e.g., Electricity, Repair"
+                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border focus:border-red-500 focus:ring-red-500 text-sm">
+                            </div>
+                        </div>
+
+                        <!-- Filtered Results Table -->
+                        <div class="flex justify-between items-center mb-4">
+                            <p class="text-md font-bold text-gray-700">Total Filtered Expenses: <span id="total-filtered-expense" class="text-red-600 currency-inr">₹ 0</span></p>
+                            <button onclick="exportFilteredExpenses()"
+                                class="flex items-center text-sm font-medium text-white bg-green-500 hover:bg-green-600 px-3 py-1.5 rounded-lg shadow transition duration-150">
+                                <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                                Export Filtered
+                            </button>
+                        </div>
+                        <div class="overflow-x-auto">
+                            <table class="min-w-full divide-y divide-gray-200">
+                                <thead class="bg-gray-50">
+                                    <tr>
+                                        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Reason</th>
+                                        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider text-center">Date</th>
+                                        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Amount (₹)</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="historical-expenses-body" class="bg-white divide-y divide-gray-200">
+                                    <tr><td colspan="3" class="p-4 text-center text-gray-500">Use filters above to view historical expenses.</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Custom Alert Modal (Hidden by default) -->
+        <div id="custom-alert-modal" class="hidden fixed z-10 inset-0 overflow-y-auto" aria-labelledby="modal-title" role="dialog" aria-modal="true">
+            <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+                <div class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true"></div>
+                <span class="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
+                <div class="inline-block align-bottom bg-white rounded-lg text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full">
+                    <div class="bg-white px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
+                        <div class="sm:flex sm:items-start">
+                            <div id="alert-icon" class="mx-auto flex-shrink-0 flex items-center justify-center h-12 w-12 rounded-full">
+                                <!-- Icon will be injected by JS -->
+                            </div>
+                            <div class="mt-3 text-center sm:mt-0 sm:ml-4 sm:text-left">
+                                <h3 class="text-lg leading-6 font-medium text-gray-900" id="modal-title">Notification</h3>
+                                <div class="mt-2">
+                                    <p id="alert-text" class="text-sm text-gray-500">
+                                        Operation completed successfully.
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
