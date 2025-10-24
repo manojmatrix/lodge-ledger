@@ -45,8 +45,8 @@
     <!-- Firebase SDK Imports -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, query, orderBy, onSnapshot, addDoc, serverTimestamp, setDoc, doc, where, getDocs, runTransaction, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, query, orderBy, onSnapshot, addDoc, serverTimestamp, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
 
         // Global variables for Firebase services
@@ -54,7 +54,23 @@
         let db;
         let auth;
         let userId = 'unknown';
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+        // --- DEPLOYMENT FIX: PASTE YOUR FIREBASE CONFIGURATION HERE ---
+        //
+        // 1. Get this object from your Firebase Console > Project Settings > Your Apps
+        // 2. Replace the placeholder values with your project's actual credentials.
+        //
+        const FIREBASE_CONFIG = {
+            apiKey: "YOUR_API_KEY", // <<< REPLACE THIS VALUE
+            authDomain: "YOUR_AUTH_DOMAIN", // <<< REPLACE THIS VALUE
+            projectId: "YOUR_PROJECT_ID", // <<< REPLACE THIS VALUE
+            storageBucket: "YOUR_STORAGE_BUCKET", // <<< REPLACE THIS VALUE
+            messagingSenderId: "YOUR_MESSAGING_SENDER_ID", // <<< REPLACE THIS VALUE
+            appId: "YOUR_APP_ID" // <<< REPLACE THIS VALUE
+        };
+        
+        // Static app ID for deployment (used in data paths)
+        const appId = 'lodge-business-app'; 
 
         // --- Data Stores ---
         let allSales = [];
@@ -78,30 +94,33 @@
         };
 
 
-        // --- CORE FIREBASE INITIALIZATION AND AUTHENTICATION ---
+        // --- CORE FIREBASE INITIALIZATION AND AUTHENTICATION (UPDATED) ---
         window.initFirebase = async () => {
             try {
+                // Check if the user remembered to update the config
+                if (FIREBASE_CONFIG.apiKey === "YOUR_API_KEY") {
+                    console.error("FIREBASE CONFIGURATION MISSING. Cannot initialize.");
+                    document.getElementById('status-message').textContent = `ERROR: Firebase configuration is missing. Please update FIREBASE_CONFIG in index.html with your project details.`;
+                    return;
+                }
+                
                 // Set debug logging for Firestore
                 setLogLevel('Debug');
 
-                const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
-                app = initializeApp(firebaseConfig);
+                // 1. Initialize the app with the hardcoded configuration
+                app = initializeApp(FIREBASE_CONFIG);
                 db = getFirestore(app);
                 auth = getAuth(app);
 
-                // Authentication using custom token or anonymously
-                const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+                // 2. Sign in anonymously (This is the default for deployment outside the Canvas)
+                await signInAnonymously(auth);
 
-                if (initialAuthToken) {
-                    await signInWithCustomToken(auth, initialAuthToken);
-                } else {
-                    await signInAnonymously(auth);
-                }
-
+                // 3. Set up the auth state listener to get the userId and start listeners
                 onAuthStateChanged(auth, (user) => {
                     if (user) {
                         userId = user.uid;
-                        document.getElementById('user-id-display').textContent = `User ID: ${userId.substring(0, 8)}...`;
+                        // Display the full userId for easy management/debugging
+                        document.getElementById('user-id-display').textContent = `Project: ${FIREBASE_CONFIG.projectId} | User ID: ${userId}`;
                         console.log("Firebase initialized and user signed in:", userId);
                         // Start listeners only after auth is ready
                         window.setupRealtimeListeners();
@@ -119,14 +138,14 @@
             }
         };
 
-        // --- FIREBASE DATA PATHS ---
+        // --- FIREBASE DATA PATHS (UNCHANGED, uses static appId) ---
 
         const getUserId = () => auth.currentUser?.uid || crypto.randomUUID();
         const getSalesCollectionRef = () => collection(db, `artifacts/${appId}/public/data/sales_records`);
         const getExpensesCollectionRef = () => collection(db, `artifacts/${appId}/users/${getUserId()}/daily_expenses`);
 
 
-        // --- FIREBASE DATA FUNCTIONS ---
+        // --- FIREBASE DATA FUNCTIONS (UNCHANGED) ---
 
         // Saves a new sales record
         window.saveSale = async (event) => {
@@ -204,7 +223,7 @@
             }
         };
 
-        // --- DASHBOARD METRICS CALCULATION AND RENDERING ---
+        // --- DASHBOARD METRICS CALCULATION AND RENDERING (UNCHANGED) ---
         
         window.calculateAndRenderDashboard = () => {
             // Get start and end date for the current month
@@ -257,7 +276,7 @@
         };
 
 
-        // --- REAL-TIME LISTENERS ---
+        // --- REAL-TIME LISTENERS (UNCHANGED) ---
 
         window.setupRealtimeListeners = () => {
             // Listener for Sales Records
@@ -279,7 +298,7 @@
             });
         };
 
-        // --- RENDERING SUB-COMPONENTS ---
+        // --- RENDERING SUB-COMPONENTS (UNCHANGED) ---
 
         const formatDate = (dateString) => {
             if (!dateString) return 'N/A';
@@ -387,7 +406,7 @@
             `;
         };
         
-        // --- HISTORICAL EXPENSE FILTERING AND RENDERING (NEW FEATURE 1) ---
+        // --- HISTORICAL EXPENSE FILTERING AND RENDERING (UNCHANGED) ---
 
         window.filterHistoricalExpenses = () => {
             const startDate = document.getElementById('expense-start-date')?.value;
@@ -449,7 +468,7 @@
             document.getElementById('total-filtered-expense').textContent = formatINR(totalFilteredAmount);
         };
 
-        // --- DATA EXPORT FUNCTIONALITY (NEW FEATURE 2) ---
+        // --- DATA EXPORT FUNCTIONALITY (UNCHANGED) ---
 
         /**
          * Generates and downloads a CSV file from data.
@@ -533,7 +552,7 @@
             window.exportToCSV(filteredExpenses, headers, 'Lodge_Filtered_Expenses');
         };
 
-        // --- UI UTILITIES ---
+        // --- UI UTILITIES (UNCHANGED) ---
 
         // Function to handle tab switching
         window.switchTab = (tabName) => {
@@ -877,3 +896,4 @@
     </div>
 </body>
 </html>
+
